@@ -1,0 +1,1413 @@
+*******************************************************************************************************************************************************
+Laboratorio de MLOps para subir modelo de ML a la nube de GCP
+*******************************************************************************************************************************************************
+Subir un modelo a la nube de Google realmente significa desplegarlo en Google Cloud Platform usando el servicio de ML administrado llamado Vertex AI.
+
+1.- Antes de subirlo: Preparar el modelo correctamente
+A. El modelo debe estar listo para producción
+
+No solo entrenado, sino:
+✅ Métricas validadas (AUC, RMSE, F1, etc.)
+✅ Pipeline de preprocesamiento definido
+✅ Control de versiones
+✅ Reproducible
+
+scikit-learn → serializa con joblib
+XGBoost → guarda como .json
+TensorFlow → formato SavedModel
+PyTorch → .pt
+
+2.-Separar entrenamiento de inferencia
+En producción necesitas:
+🎯 Código de inferencia
+
+        def predict(request):
+            # cargar modelo
+            # transformar datos
+            # retornar predicción
+
+En GCP esto puede hacerse de dos formas:
+Vertex AI Model Upload  -->  Modelos estándar
+Custom                  -->  Container
+
+3.- Empaquetar correctamente el modelo. Custom Container
+1️⃣ Dockerfile
+2️⃣ requirements.txt
+3️⃣ app.py (API REST)
+4️⃣ Construir imagen Docker
+5️⃣ Subir el modelo a Vertex AI
+6️⃣ Lo que REALMENTE se necesita a nivel infraestructura
+        ✔ Proyecto en GCP
+        ✔ Facturación habilitada
+        ✔ API Vertex AI activada
+        ✔ Permisos IAM:
+            roles/aiplatform.admin
+            roles/storage.admin
+            roles/artifactregistry.admin
+        ✔ gcloud CLI instalado
+7️⃣ Recomendaciones profesionales
+        Model Registry
+        Versionado de modelos
+        Logging con Cloud Logging
+        Monitoreo de drift
+        CI/CD (Cloud Build)
+        Infraestructura como código (Terraform)
+8️⃣ Alternativas según sea el caso con el serviciorecomendado:
+Solo API ligera	    Cloud Run
+Batch scoring	    Vertex Batch Prediction
+Pipeline completo	Vertex AI Pipelines
+ETL + Modelo	    Dataflow + Vertex
+
+4.- Flujo completo real de producción
+Entrenamiento
+     ↓
+Validación
+     ↓
+Serialización
+     ↓
+Dockerización
+     ↓
+Subir a Artifact Registry
+     ↓
+Registrar modelo en Vertex AI
+     ↓
+Crear Endpoint
+     ↓
+Deploy
+     ↓
+Monitoreo
+
+
+*****************************************************************************************************
+Modelo de probabilidad de incumplimiento con GCP y Vertex AI
+
+Objetivo:
+Entrenar → Preparar → Empaquetar → Subir → Desplegar → Probar → Apagar recursos
+
+Flujo:
+1 Preparar proyecto reproducible
+2 Validar modelo entrenado
+3 Separar entrenamiento e inferencia
+4 Serializar modelo
+5 Crear API de inferencia
+6 Dockerizar
+7 Subir imagen a Artifact Registry
+8 Registrar modelo en Vertex AI
+9 Crear Endpoint
+10 Deploy
+11 Probar predicciones
+12 Apagar recursos para evitar cargos
+
+En el despliegue usaremos algo como:
+n1-standard-2
+*****************************************************************************************************
+Preparar el modelo reproducible
+Antes de subir cualquier modelo debemos asegurar reproducibilidad.
+
+Crear carpeta --> ml_model_gcp/ con la siguiente estructura:
+ml_model_gcp/
+│
+├── data/   --> datasets
+│   ├── raw
+│   └── processed
+│
+├── src/  --> código de entrenamiento
+│   ├── train.py  --> sirve para reproducir el entrenamiento del modelo (incluir el script de entrenamiento, incluso si el modelo ya está entrenado) debe poder ejecutar todo el proceso de entrenamiento desde cero
+│   ├── predict.py
+│   ├── preprocessing.py
+│
+├── models/  --> modelo serializado (artefactos del modelo)
+│
+├── config/  --> configuraciones reproducibles.
+│   └── config.yaml
+│
+├── api/  --> código de inferencia (API que usará el modelo en producción)
+│   └── app.py
+│
+├── requirements.txt
+├── Dockerfile
+├── README.md
+└── .gitignore
+
+
+Control de versiones 
+    git init 
+
+Crear .gitignore
+
+Versionar dependencias
+    requirements.txt
+    pip freeze > requirements.txt
+
+Registrar versión del modelo
+    config/config.yaml
+
+Nota. train.py se debe documentar. Muchas veces en proyectos reales el dataset está en:
+S3
+BigQuery
+Data Lake
+y el script lo descarga. train.py debe tener carga de datos, preprocessing, pipeline, training, evaluación, guardar modelo.
+*****************************************************************************************************
+Validar el modelo antes de subirlo
+        Verificar métricas
+        Verificar features
+        Verificar preprocessing
+        Verificar reproducibilidad
+        Guardar el modelo correctamente
+
+    Dentro de la carpeta src crea el archivo: src/train.py    (ni src\train.py)
+    Producción necesita scripts reproducibles
+    Antes de guardar el modelo debes validar métricas del modelo y revisar si realmente es bueno.
+
+    En train.py algo como:
+                from sklearn.metrics import classification_report, roc_auc_score
+                preds = model.predict(X_test)
+                print(classification_report(y_test, preds))
+
+                probs = model.predict_proba(X_test)[:,1]
+                print("AUC:", roc_auc_score(y_test, probs))
+
+Verificar features del modelo
+    Esto es crítico para producción, se deben guardar las features.
+
+        features = list(X_train.columns)
+        print(features)
+    Crear config/features.json
+
+Verificar preprocessing
+    Revisa si tu modelo usa algo como: StandardScaler, OneHotEncoder, Imputer. Deben guardarse tambien si es que se usaron. Lo mejor es hacerlo con Pipeline
+                from sklearn.pipeline import Pipeline
+                pipeline = Pipeline([
+                    ("scaler", StandardScaler()),
+                    ("model", RandomForestClassifier())
+                ])
+
+Guardar el modelo
+    Guardaremos el modelo en models/.
+
+Validar que el modelo se puede cargar
+    Crear archivo src/test_model.py
+                import joblib
+                import os
+                BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                model_path = os.path.join(BASE_DIR, "models", "credit_model_v1.joblib")
+                model = joblib.load(model_path)
+                print("Modelo cargado correctamente")
+                print(type(model))
+    Ejecutar en consola python src/test_model.py
+
+Guardar dependencias
+    pip freeze > requirements.txt   --> Esto asegura reproducibilidad.
+*****************************************************************************************************
+Separar entrenamiento de inferencia
+
+En producción no ejecutamos train.py, solo ejecutamos predicciones. Por eso debemos crear un servicio que:
+    reciba datos
+    cargue el modelo
+    devuelva predicción
+Pequeña arquitectura a seguir:
+Cliente
+   │
+   │ request JSON
+   ▼
+API (Flask)
+   │
+   ▼
+Modelo ML
+   │
+   ▼
+Predicción
+Luego esta API se subira a Google Cloud Platform / Vertex AI
+
+Crear API de inferencia:
+    Dentro de la carpeta api  --> api/app.py
+
+                from flask import Flask, request, jsonify
+                import joblib
+                import pandas as pd
+                import os
+                app = Flask(__name__)
+                # Obtener ruta base del proyecto
+                BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                # Ruta del modelo
+                model_path = os.path.join(BASE_DIR, "models", "credit_model_v1.joblib")
+                # Cargar modelo
+                model = joblib.load(model_path)
+                @app.route("/", methods=["GET"])
+                def health():
+                    return {"status": "API funcionando"}
+                @app.route("/predict", methods=["POST"])
+                def predict():
+                    try:
+                        data = request.get_json()
+                        instances = data.get("instances", data)
+                        df = pd.DataFrame(instances)
+                        predictions = model.predict(df)
+                        return jsonify({
+                            "predictions": predictions.tolist()
+                        })
+                    except Exception as e:
+                        return jsonify({
+                            "error": str(e)
+                        }), 500
+                if __name__ == "__main__":
+                    app.run(host="0.0.0.0", port=8080)
+
+Agregar Flask a dependencias
+    Instala Flask dentro de tu entorno virtual
+
+Probar la API localmente
+    Ejecutar python api\app.py   --> Running on http://127.0.0.1:8080
+
+Probar endpoint de salud
+    En el navegador http://127.0.0.1:8080   -> {"status":"API funcionando"}
+
+La API:
+recibe datos
+↓
+carga modelo
+↓
+ejecuta predict()
+↓
+devuelve resultado
+*****************************************************************************************************
+Probar predicciones reales en la API
+    Debes estar dentro del entorno virtual (venv)
+
+Mantener la API ejecutándose
+    Ejecutar python api\app.py  --> Running on http://127.0.0.1:5000
+
+Crear datos de prueba
+    Abrir config/features.json
+    El request debe usar exactamente las mismas columnas del json.
+
+Hacer request al modelo
+    Abrimos otra terminal (la API debe seguir corriendo)
+
+En PowerShell usaremos Invoke-RestMethod. Abrir otra terminal no importa si estás dentro del entorno virtual o no.
+$body = '[{"edad":35,"ingreso":25000,"deuda_total":8000,"score_crediticio":650,"tiene_aval":1}]'
+Invoke-RestMethod Uri "http://127.0.0.1:5000/predict" Method POST ContentType "application/json" Body $body
+
+Acabamos de simular 
+Sistema de originación de crédito
+          │
+          │ JSON
+          ▼
+API del modelo (Flask)
+          │
+          ▼
+modelo.predict()
+          │
+          ▼
+resultado (respuesta json)
+*****************************************************************************************************
+El proyecto ya cumple varias prácticas de MLOps profesional:
+
+✔ estructura del proyecto
+✔ entorno virtual reproducible
+✔ features registradas
+✔ modelo serializado / versionado 
+✔ dependencias congeladas
+✔ separación entrenamiento / inferencia
+✔ API de inferencia
+✔ prueba real de predicción
+
+Esto significa que tu modelo ya está listo para producción.
+*****************************************************************************************************
+Dockerizar el modelo
+    Vamos a crear un contenedor usando Docker. Esto nos permitirá ejecutar el modelo de forma idéntica en cualquier lugar.
+    2️⃣ Docker Desktop debe estar abierto. En Windows debes tener Docker Desktop ejecutándose.
+    Lo recomendable es que todo este dentro de un mismo pipeline --> preprocessor, scalers, encoders, feature, transformations, modelo final.
+    El flujo interno cuando la API recibe datos: JSON request ocurre esto dentro del pipeline:
+    DataFrame
+       │
+       ▼
+    ColumnTransformer / preprocessing
+       │
+       ▼
+    model voting
+       │
+       ▼
+    predicción
+    Crear el Dockerfile: En ml_model_gcp/ --> crear Dockerfile que debe contener:
+            FROM python:3.10-slim  --> Imagen base. Usamos Python 3.10 porque es compatible con el modelo.
+            WORKDIR /app --> Directorio de trabajo. Todo el proyecto se copiará aquí.
+            COPY requirements.txt .
+            RUN pip install --no-cache-dir -r requirements.txt --> Instalar dependencias
+            COPY . .     --> Copiar proyecto. Copía models, api, config, src
+            EXPOSE 8080  --> Puerto del servicio. Los servicios en nube esperan puerto 8080.
+            CMD ["python", "api/app.py"]  --> Ejecutar API. Esto levantará tu API automáticamente.
+
+Construir el contenedor. Verificamos que tu modelo realmente puede ejecutarse fuera de tu máquina.
+Construir la imagen Docker en la carpeta del proyecto ml_model_gcp. (No necesitas estar dentro del entorno virtual.)
+        Ejecutar en consola terminal  -->  docker build -t credit-model-api .
+        docker build
+           │
+           ├─ -t credit-model-api   ← nombre de la imagen
+           │
+           └─ .                     ← usa el Dockerfile de la carpeta actual
+        Resultado esperado
+           Successfully built xxxxxxxxx
+           Successfully tagged credit-model-api:latest
+
+Verificar la imagen creada
+        Ejecutar en terminal -->  docker images  
+        REPOSITORY          TAG       IMAGE ID       SIZE
+        credit-model-api    latest    xxxxxxxx       xxxMB
+
+Ejecutamos el modelo dentro del contenedor. Ejecutamos el contenedor. En terminal y estar en la carpeta del proyecto. 
+        docker run -p 8080:8080 credit-model-api
+            docker run
+               │
+               ├─ -p 8080:8080
+               │     │
+               │     ├─ puerto local
+               │     └─ puerto dentro del contenedor
+               │
+               └─ credit-model-api
+        Resultado: Running on http://0.0.0.0:8080
+
+Probar endpoint de salud
+    En el navegador http://localhost:8080  --> debe responder {"status":"API funcionando"}
+
+Verificación final del contenedor
+        $body = '[{"edad":35,"ingreso":25000,"deuda_total":8000,"score_crediticio":650,"tiene_aval":1}]'
+        Invoke-RestMethod Uri "http://localhost:8080/predict" Method POST ContentType "application/json" Body $body
+*****************************************************************************************************
+Usando la terminal de Google, Google Cloud CLI, nos autenticamos en GCP:
+    gcloud auth login
+    Esto abrirá el navegador. Debemos iniciar sesión con la cuenta donde tienes tu prueba gratuita de GCP
+
+Verificar proyectos
+    gcloud projects list
+
+Seleccionar el proyecto
+    gcloud config set project MI_PROJECT_ID
+
+
+
+
+Welcome! This command will take you through the configuration of gcloud.
+
+Your current configuration has been set to: [default]
+
+You can skip diagnostics next time by using the following flag:
+  gcloud init --skip-diagnostics
+
+Network diagnostic detects and fixes local network connection issues.
+Checking network connection...done.
+Reachability Check passed.
+Network diagnostic passed (1/1 checks passed).
+
+You must sign in to continue. Would you like to sign in (selecting "Y" will open your browser to the sign-in page where
+you complete authentication) (Y/n)?  y
+
+Your browser has been opened to visit:
+
+    https://accounts.google.com/o/oauth2/auth?response_type=code&client_id=32555940559.apps.googleusercontent.com&redirect_uri=http%3A%2F%2Flocalhost%3A8085%2F&scope=openid+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fappengine.admin+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fsqlservice.login+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcompute+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Faccounts.reauth&state=9zXYV0UFVbPVnoS0WVkeMxogk3FYnY&access_type=offline&code_challenge=Du08xIiLNpD3o1uu3i3dpmvW5Sfwz-L8G6Lo87U2a2M&code_challenge_method=S256
+
+You are signed in as: [jluisocana2519@gmail.com].
+
+Pick cloud project to use:
+ [1] captura-ocr-dev
+ [2] modelo-pruebas-cloud
+ [3] project-a6e837f9-b14d-4f57-842
+ [4] Enter a project ID
+ [5] Create a new project
+Please enter numeric choice or text value (must exactly match list item):  modelo-pruebas-cloud
+
+Your current project has been set to: [modelo-pruebas-cloud].
+
+Not setting default zone/region (this feature makes it easier to use
+[gcloud compute] by setting an appropriate default value for the
+--zone and --region flag).
+See https://cloud.google.com/compute/docs/gcloud-compute section on how to set
+default compute region and zone manually. If you would like [gcloud init] to be
+able to do this for you the next time you run it, make sure the
+Compute Engine API is enabled for your project on the
+https://console.developers.google.com/apis page.
+
+Created a default .boto configuration file at [C:\Users\jluis\.boto]. See this file and
+[https://cloud.google.com/storage/docs/gsutil/commands/config] for more
+information about configuring Google Cloud Storage.
+The Google Cloud CLI is configured and ready to use!
+
+* Commands that require authentication will use jluisocana2519@gmail.com by default
+* Commands will reference project `modelo-pruebas-cloud` by default
+Run `gcloud help config` to learn how to change individual settings
+
+This gcloud configuration is called [default]. You can create additional configurations if you work with multiple accounts and/or projects.
+Run `gcloud topic configurations` to learn more.
+
+Some things to try next:
+
+* Run `gcloud --help` to see the Cloud Platform services you can interact with. And run `gcloud help COMMAND` to get help on any gcloud command.
+* Run `gcloud topic --help` to learn about advanced features of the CLI like arg files and output formatting
+* Run `gcloud cheat-sheet` to see a roster of go-to `gcloud` commands.
+
+D:\GCP>gcloud auth list
+     Credentialed Accounts
+ACTIVE  ACCOUNT
+*       jluisocana2519@gmail.com
+
+To set the active account, run:
+    $ gcloud config set account `ACCOUNT`
+
+
+D:\GCP>gcloud config get-value project  --> Verificar el proyecto activo
+modelo-pruebas-cloud
+
+D:\GCP>gcloud config set compute/region us-central1  --> Configurar la región por defecto
+API [compute.googleapis.com] not enabled on project [modelo-pruebas-cloud]. Would you like to enable and retry (this
+will take a few minutes)? (y/N)?  y
+
+Enabling service [compute.googleapis.com] on project [modelo-pruebas-cloud]...
+Operation "operations/acf.p2-1080487390825-f459e87d-7778-4b46-a59b-97d49fcc2130" finished successfully.
+Updated property [compute/region].
+
+D:\GCP>gcloud config set compute/zone us-central1-a
+Updated property [compute/zone].
+
+D:\GCP>gcloud config list
+API [cloudresourcemanager.googleapis.com] not enabled on project [modelo-pruebas-cloud]. Would you like to enable and
+retry (this will take a few minutes)? (y/N)?  y
+
+Enabling service [cloudresourcemanager.googleapis.com] on project [modelo-pruebas-cloud]...
+Operation "operations/acat.p2-1080487390825-38d2d9ae-ac79-4031-831c-8bc4f60d02d9" finished successfully.
+[accessibility]
+screen_reader = False
+[compute]
+region = us-central1
+zone = us-central1-a
+[core]
+account = jluisocana2519@gmail.com
+disable_usage_reporting = True
+project = modelo-pruebas-cloud
+
+Your active configuration is: [default]
+
+D:\GCP>gcloud artifacts repositories create credit-model-repo --repository-format=docker --location=us-central1 --description="Repositorio de modelos ML"  --> Crear el repositorio Docker
+API [artifactregistry.googleapis.com] not enabled on project [modelo-pruebas-cloud]. Would you like to enable and retry
+(this will take a few minutes)? (y/N)?  y
+
+Enabling service [artifactregistry.googleapis.com] on project [modelo-pruebas-cloud]...
+Operation "operations/acat.p2-1080487390825-2ba014b2-f7ff-44bd-a5f5-a23072792e69" finished successfully.
+Create request issued for: [credit-model-repo]
+Waiting for operation [projects/modelo-pruebas-cloud/locations/us-central1/operations/7c018d28-6e6e-4750-bb64-3e62be90b
+052] to complete...done.
+Created repository [credit-model-repo].
+
+D:\GCP>gcloud artifacts repositories list        -->  Verificar que el repositorio existe
+Listing items under project modelo-pruebas-cloud, across all locations.
+
+                                                                           ARTIFACT_REGISTRY
+REPOSITORY         FORMAT  MODE                 DESCRIPTION                LOCATION     LABELS  ENCRYPTION          CREATE_TIME          UPDATE_TIME          SIZE (MB)
+credit-model-repo  DOCKER  STANDARD_REPOSITORY  Repositorio de modelos ML  us-central1          Google-managed key  2026-03-04T14:43:33  2026-03-04T14:43:33  0
+
+D:\GCP>gcloud auth configure-docker us-central1-docker.pkg.dev         --> Conectar Docker con Google Cloud
+Adding credentials for: us-central1-docker.pkg.dev
+After update, the following will be written to your Docker config file located at [C:\Users\jluis\.docker\config.json]:
+ {
+  "credHelpers": {
+    "us-central1-docker.pkg.dev": "gcloud"
+  }
+}
+
+Do you want to continue (Y/n)?  y
+
+Docker configuration file updated.
+
+D:\GCP>gcloud config get-value project
+modelo-pruebas-cloud
+
+D:\GCP>docker images
+                                                                                                    i Info →   U  In Use
+IMAGE                               ID             DISK USAGE   CONTENT SIZE   EXTRA
+credit-model-api:latest             a64324b6514e       1.09GB          251MB    U
+public.ecr.aws/lambda/python:3.11   f302b4338be4          1GB          242MB
+
+D:\GCP>docker tag credit-model-api us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest
+
+D:\GCP>docker images
+                                                                                                    i Info →   U  In Use
+IMAGE                                                                   ID             DISK USAGE   CONTENT SIZE   EXTRA
+credit-model-api:latest                                                 a64324b6514e       1.09GB          251MB    U
+public.ecr.aws/lambda/python:3.11                                       f302b4338be4          1GB          242MB
+us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest
+                                                                        a64324b6514e       1.09GB          251MB    U
+
+D:\GCP>docker push us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest    --> Subir la imagen a GCP
+The push refers to repository [us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api]
+33ddcf2a4b00: Pushed
+44df7c9b0118: Pushed
+206356c42440: Pushed
+8a47105dfae1: Pushed
+7fe6b2798913: Pushed
+5de15e2cec2c: Pushed
+f8bb22041f7b: Pushed
+359c79689fcd: Pushed
+aecf3e6b3e04: Pushed
+latest: digest: sha256:a64324b6514e2f2790a415bc467988eb62c602894f5fc3a227c773600df33586 size: 856     --> Eso significa que la imagen ya está almacenada en Artifact Registry.
+
+D:\GCP>gcloud artifacts docker images list us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo  --> Verificar en GCP
+Listing items under project modelo-pruebas-cloud, location us-central1, repository credit-model-repo.
+
+IMAGE                                                                               DIGEST                                                                   CREATE_TIME          UPDATE_TIME          SIZE
+us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api  sha256:5112c90c8a012493627123bee05c80129e68444161e27d6f05f11e8400717223  2026-03-04T14:51:39  2026-03-04T14:51:39  250974725
+us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api  sha256:a64324b6514e2f2790a415bc467988eb62c602894f5fc3a227c773600df33586  2026-03-04T14:51:39  2026-03-04T14:51:39  None
+us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api  sha256:ab1dc737fc660b2834d120093b5727c293a3a178a6ff8dc70b24f10e9c158e6a  2026-03-04T14:51:39  2026-03-04T14:51:39  1175
+
+D:\GCP>gcloud services enable aiplatform.googleapis.com  --> Habilitar Vertex AI
+Operation "operations/acat.p2-1080487390825-b67770fd-7fc3-4d12-925a-7dc8224b4b12" finished successfully.
+
+D:\GCP>gcloud services list --enabled | findstr aiplatform
+aiplatform.googleapis.com            Vertex AI API
+
+D:\GCP>gcloud ai models upload --region=us-central1 --display-name=credit-model --container-image-uri=us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest --> Modelo ML desplegable (No crea todavía un endpoint)
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+ERROR: (gcloud.ai.models.upload) FAILED_PRECONDITION: Vertex AI Service Agent service-1080487390825@gcp-sa-aiplatform.iam.gserviceaccount.com does not have permission to access Artifact Registry repository projects/modelo-pruebas-cloud/locations/us-central1/repositories/credit-model-repo.
+
+D:\GCP>gcloud projects describe modelo-pruebas-cloud --format="value(projectNumber)"
+1080487390825
+
+D:\GCP>gcloud artifacts repositories add-iam-policy-binding credit-model-repo --location=us-central1 --member="serviceAccount:service-1080487390825@gcp-sa-aiplatform.iam.gserviceaccount.com" --role="roles/artifactregistry.reader"
+Updated IAM policy for repository [credit-model-repo].
+bindings:
+- members:
+  - serviceAccount:service-1080487390825@gcp-sa-aiplatform.iam.gserviceaccount.com
+  role: roles/artifactregistry.reader
+etag: BwZMORiDiTE=
+version: 1
+
+D:\GCP>gcloud ai models upload --region=us-central1 --display-name=credit-model --container-image-uri=us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Waiting for operation [7547181549746126848]...done.          --> El modelo se registró correctamente en Vertex AI dentro del proyecto
+
+D:\GCP>gcloud ai models list --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+MODEL_ID             DISPLAY_NAME
+1824994688550043648  credit-model
+
+D:\GCP>gcloud ai endpoints create --region=us-central1 --display-name=credit-model-endpoint   -->***** Crear el endpoint en Vertex AI *****
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Waiting for operation [3069759095209721856]...done.
+Created Vertex AI endpoint: projects/1080487390825/locations/us-central1/endpoints/1799892288332103680.
+
+D:\GCP>gcloud ai endpoints deploy-model 1799892288332103680 --region=us-central1 --model=1824994688550043648 --display-name=credit-model-deployed --machine-type=n1-standard-2  --> Desplegar el modelo
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Waiting for operation [6180915206932135936]...failed.
+ERROR: (gcloud.ai.endpoints.deploy-model) Operation https://us-central1-aiplatform.googleapis.com/v1beta1/projects/1080487390825/locations/us-central1/endpoints/1799892288332103680/operations/6180915206932135936 has not finished in 1800 seconds. The operations may still be underway remotely and may still succeed; use gcloud list and describe commands or https://console.developers.google.com/ to check resource state.
+
+D:\GCP>gcloud ai endpoints describe 1799892288332103680 --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+createTime: '2026-03-04T21:09:52.479558Z'
+displayName: credit-model-endpoint
+etag: AMEw9yO3t0Bmv9m_riHYfB0-tianPeDBvCC8HT8FYM5g1XxC6gs4v1DT5iqe_m9DynFO
+name: projects/1080487390825/locations/us-central1/endpoints/1799892288332103680
+updateTime: '2026-03-04T21:13:30.456354Z'
+
+D:\GCP>gcloud ai operations list --region=us-central1
+ERROR: (gcloud.ai.operations) Invalid choice: 'list'.
+Maybe you meant:
+  gcloud ai-platform operations list
+  gcloud ai operations describe
+  gcloud ai-platform operations cancel
+  gcloud ai-platform operations describe
+  gcloud ai-platform operations wait
+  gcloud ai endpoints list
+  gcloud ai models list
+  gcloud ai models list-version
+
+To search the help text of gcloud commands, run:
+  gcloud help -- SEARCH_TERMS
+
+D:\GCP>gcloud ai endpoints describe 1799892288332103680 --region=us-central1 --format="yaml"
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+createTime: '2026-03-04T21:09:52.479558Z'
+displayName: credit-model-endpoint
+etag: AMEw9yO2BmC3BgkExVw-kxshtxGrSnYdX3FAjZxMqTwDKapvD4QEkez8LnCMIG1xVRlJ
+name: projects/1080487390825/locations/us-central1/endpoints/1799892288332103680
+updateTime: '2026-03-04T21:13:30.456354Z'
+
+D:\GCP>gcloud ai models upload --region=us-central1 --display-name=credit-model-v2 --container-image-uri=us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest --container-predict-route=/predict --container-health-route=/
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Waiting for operation [771880948227637248]...done.
+
+D:\GCP>gcloud ai models list --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+MODEL_ID             DISPLAY_NAME
+7283920386876506112  credit-model-v2
+1824994688550043648  credit-model
+
+D:\GCP>gcloud ai models upload --region=us-central1 --display-name=credit-model-v2 --container-image-uri=us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest --container-predict-route=/predict --container-health-route=/
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Waiting for operation [572174452251426816]...done.
+
+D:\GCP>gcloud ai models list --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+MODEL_ID             DISPLAY_NAME
+6362371313125818368  credit-model-v2
+7283920386876506112  credit-model-v2
+1824994688550043648  credit-model
+
+D:\GCP>gcloud ai endpoints deploy-model 1799892288332103680 --region=us-central1 --model=6362371313125818368 --display-name=credit-model-deployed --machine-type=n1-standard-2
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Waiting for operation [4121292433596088320]...done.
+Deployed a model to the endpoint 1799892288332103680. Id of the deployed model: 1678558981183766528.
+
+D:\GCP>gcloud ai endpoints describe 1799892288332103680 --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+createTime: '2026-03-04T21:09:52.479558Z'
+deployedModels:
+- createTime: '2026-03-04T22:05:24.005782Z'
+  dedicatedResources:
+    machineSpec:
+      machineType: n1-standard-2
+    maxReplicaCount: 1
+    minReplicaCount: 1
+  displayName: credit-model-deployed
+  id: '1678558981183766528'
+  model: projects/1080487390825/locations/us-central1/models/6362371313125818368
+  modelVersionId: '1'
+  status:
+    availableReplicaCount: 1
+    lastUpdateTime: '2026-03-04T22:15:12.588953Z'
+displayName: credit-model-endpoint
+etag: AMEw9yMRKsixhfGY0BvTT8AoW68zZryzpxZFEwF9JRo-GuMQ0NKhuFf9Mg1JmGOc87bF
+name: projects/1080487390825/locations/us-central1/endpoints/1799892288332103680
+updateTime: '2026-03-04T21:13:30.456354Z'
+
+D:\GCP>gcloud ai endpoints describe 1799892288332103680 --region=us-central1 --format="value(name)"
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+projects/1080487390825/locations/us-central1/endpoints/1799892288332103680
+
+D:\GCP>notepad request.json
+
+D:\GCP>gcloud ai endpoints predict 1799892288332103680 --region=us-central1 --json-request=request.json
+Using endpoint [https://us-central1-prediction-aiplatform.googleapis.com/]
+ERROR: (gcloud.ai.endpoints.predict) FAILED_PRECONDITION: Endpoint projects/modelo-pruebas-cloud/locations/us-central1/endpoints/1799892288332103680 misconfigured, "traffic_split" not set.  Verify if any models are deployed to the endpoint and traffic split is configured for them.
+
+D:\GCP>gcloud ai endpoints update 1799892288332103680 --region=us-central1 --traffic-split=1678558981183766528=100
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Updated Vertex AI endpoint [projects/1080487390825/locations/us-central1/endpoints/1799892288332103680].
+
+D:\GCP>gcloud ai endpoints describe 1799892288332103680 --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+createTime: '2026-03-04T21:09:52.479558Z'
+deployedModels:
+- createTime: '2026-03-04T22:05:24.005782Z'
+  dedicatedResources:
+    machineSpec:
+      machineType: n1-standard-2
+    maxReplicaCount: 1
+    minReplicaCount: 1
+  displayName: credit-model-deployed
+  id: '1678558981183766528'
+  model: projects/1080487390825/locations/us-central1/models/6362371313125818368
+  modelVersionId: '1'
+  status:
+    availableReplicaCount: 1
+    lastUpdateTime: '2026-03-04T22:22:14.776716Z'
+displayName: credit-model-endpoint
+etag: AMEw9yOLwnyid-Sj_QHb9BpHGn01bLhlFDQK7Oc0WJFQX_TQYovg0KGJsKEpZW-_eyEd
+name: projects/1080487390825/locations/us-central1/endpoints/1799892288332103680
+trafficSplit:
+  '1678558981183766528': 100
+updateTime: '2026-03-04T22:22:16.325431Z'
+
+D:\GCP>gcloud ai endpoints predict 1799892288332103680 --region=us-central1 --json-request=request.json
+Using endpoint [https://us-central1-prediction-aiplatform.googleapis.com/]
+ERROR: (gcloud.ai.endpoints.predict) HttpError accessing <https://us-central1-prediction-aiplatform.googleapis.com/v1/projects/modelo-pruebas-cloud/locations/us-central1/endpoints/1799892288332103680:predict?alt=json>: response: <{'x-vertex-ai-internal-prediction-backend': 'harpoon', 'date': 'Wed, 04 Mar 2026 22:23:24 GMT', 'content-type': 'text/html; charset=utf-8', 'vary': 'Origin, X-Origin, Referer', 'content-encoding': 'gzip', 'server': 'scaffolding on HTTPServer2', 'x-xss-protection': '0', 'x-frame-options': 'SAMEORIGIN', 'x-content-type-options': 'nosniff', 'alt-svc': 'h3=":443"; ma=2592000,h3-29=":443"; ma=2592000', 'transfer-encoding': 'chunked', 'status': 500}>, content <<!doctype html>
+<html lang=en>
+<title>500 Internal Server Error</title>
+<h1>Internal Server Error</h1>
+<p>The server encountered an internal error and was unable to complete your request. Either the server is overloaded or there is an error in the application.</p>
+>
+This may be due to network connectivity issues. Please check your network settings, and the status of the service you are trying to reach.
+
+D:\GCP>docker tag credit-model-api us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest
+
+D:\GCP>docker push us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest
+The push refers to repository [us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api]
+717624220721: Pushed
+aecf3e6b3e04: Layer already exists
+206356c42440: Layer already exists
+33ddcf2a4b00: Layer already exists
+44df7c9b0118: Layer already exists
+5de15e2cec2c: Layer already exists
+53540ba53f55: Pushed
+8a47105dfae1: Layer already exists
+7fe6b2798913: Layer already exists
+latest: digest: sha256:81255df3a6e104169fd5a56b9a2cb4835251d00c524a35938365223ffe0f9513 size: 856
+
+D:\GCP>gcloud ai endpoints undeploy-model 1799892288332103680 --region=us-central1 --deployed-model-id=1678558981183766528
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+
+D:\GCP>gcloud ai endpoints deploy-model 1799892288332103680 --region=us-central1 --model=6362371313125818368 --display-name=credit-model-deployed --machine-type=n1-standard-2
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Waiting for operation [3868914932602896384]...done.
+Deployed a model to the endpoint 1799892288332103680. Id of the deployed model: 4846278369085489152.
+
+D:\GCP>gcloud ai endpoints update 1799892288332103680 --region=us-central1 --traffic-split=4846278369085489152=100
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Updated Vertex AI endpoint [projects/1080487390825/locations/us-central1/endpoints/1799892288332103680].
+
+D:\GCP>gcloud ai endpoints predict 1799892288332103680 --region=us-central1 --json-request=request.json
+Using endpoint [https://us-central1-prediction-aiplatform.googleapis.com/]
+ERROR: (gcloud.ai.endpoints.predict) HttpError accessing <https://us-central1-prediction-aiplatform.googleapis.com/v1/projects/modelo-pruebas-cloud/locations/us-central1/endpoints/1799892288332103680:predict?alt=json>: response: <{'content-type': 'text/html; charset=utf-8', 'date': 'Wed, 04 Mar 2026 23:20:26 GMT', 'x-vertex-ai-internal-prediction-backend': 'harpoon', 'vary': 'Origin, X-Origin, Referer', 'content-encoding': 'gzip', 'server': 'scaffolding on HTTPServer2', 'x-xss-protection': '0', 'x-frame-options': 'SAMEORIGIN', 'x-content-type-options': 'nosniff', 'alt-svc': 'h3=":443"; ma=2592000,h3-29=":443"; ma=2592000', 'transfer-encoding': 'chunked', 'status': 500}>, content <<!doctype html>
+<html lang=en>
+<title>500 Internal Server Error</title>
+<h1>Internal Server Error</h1>
+<p>The server encountered an internal error and was unable to complete your request. Either the server is overloaded or there is an error in the application.</p>
+>
+This may be due to network connectivity issues. Please check your network settings, and the status of the service you are trying to reach.
+
+D:\GCP>gcloud ai endpoints describe 1799892288332103680 --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+createTime: '2026-03-04T21:09:52.479558Z'
+deployedModels:
+- createTime: '2026-03-04T22:44:56.648822Z'
+  dedicatedResources:
+    machineSpec:
+      machineType: n1-standard-2
+    maxReplicaCount: 1
+    minReplicaCount: 1
+  displayName: credit-model-deployed
+  id: '4846278369085489152'
+  model: projects/1080487390825/locations/us-central1/models/6362371313125818368
+  modelVersionId: '1'
+  status:
+    availableReplicaCount: 1
+    lastUpdateTime: '2026-03-04T23:22:37.581324Z'
+displayName: credit-model-endpoint
+etag: AMEw9yONs7MVV8ZZYQT6_EKmEH7yfes6e3OpwSVcOzGwD4nHybGHUhmHWPk1xmMUcwRF
+name: projects/1080487390825/locations/us-central1/endpoints/1799892288332103680
+trafficSplit:
+  '4846278369085489152': 100
+updateTime: '2026-03-04T23:19:40.427120Z'
+
+D:\GCP>gcloud ai endpoints undeploy-model 1799892288332103680 --region=us-central1 --deployed-model-id=4846278369085489152
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+
+D:\GCP>gcloud ai endpoints predict 1799892288332103680 --region=us-central1 --json-request=request.json
+Using endpoint [https://us-central1-prediction-aiplatform.googleapis.com/]
+ERROR: (gcloud.ai.endpoints.predict) FAILED_PRECONDITION: Endpoint projects/modelo-pruebas-cloud/locations/us-central1/endpoints/1799892288332103680 misconfigured, "traffic_split" not set.  Verify if any models are deployed to the endpoint and traffic split is configured for them.
+
+D:\GCP>gcloud ai endpoints describe 1799892288332103680 --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+createTime: '2026-03-04T21:09:52.479558Z'
+displayName: credit-model-endpoint
+etag: AMEw9yOzx_sFSOELhjS1f8h7gXu4LP24dT1eQ7N9ukI-xA5FeBo7AlFGibs0Qq9olOM=
+name: projects/1080487390825/locations/us-central1/endpoints/1799892288332103680
+updateTime: '2026-03-04T23:24:27.206691Z'
+
+D:\GCP>gcloud ai endpoints deploy-model 1799892288332103680 --region=us-central1 --model=6362371313125818368 --display-name=credit-model-deployed --machine-type=n1-standard-2
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Waiting for operation [8348518818208808960]...done.
+Deployed a model to the endpoint 1799892288332103680. Id of the deployed model: 4666697333944090624.
+
+D:\GCP>gcloud ai endpoints describe 1799892288332103680 --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+createTime: '2026-03-04T21:09:52.479558Z'
+deployedModels:
+- createTime: '2026-03-04T23:27:17.418349Z'
+  dedicatedResources:
+    machineSpec:
+      machineType: n1-standard-2
+    maxReplicaCount: 1
+    minReplicaCount: 1
+  displayName: credit-model-deployed
+  id: '4666697333944090624'
+  model: projects/1080487390825/locations/us-central1/models/6362371313125818368
+  modelVersionId: '1'
+  status:
+    availableReplicaCount: 1
+    lastUpdateTime: '2026-03-05T00:00:25.804262Z'
+displayName: credit-model-endpoint
+etag: AMEw9yP31KSNvVLYmxfG4EnqIoeORqn8fwz_9TgRlZL7z9k-mpDyY63PyTwv5gnLLTit
+name: projects/1080487390825/locations/us-central1/endpoints/1799892288332103680
+trafficSplit:
+  '4666697333944090624': 100
+updateTime: '2026-03-04T23:50:23.441457Z'
+
+D:\GCP>gcloud ai endpoints predict 1799892288332103680 --region=us-central1 --json-request=request.json
+Using endpoint [https://us-central1-prediction-aiplatform.googleapis.com/]
+ERROR: (gcloud.ai.endpoints.predict) HttpError accessing <https://us-central1-prediction-aiplatform.googleapis.com/v1/projects/modelo-pruebas-cloud/locations/us-central1/endpoints/1799892288332103680:predict?alt=json>: response: <{'content-type': 'text/html; charset=utf-8', 'x-vertex-ai-internal-prediction-backend': 'harpoon', 'date': 'Thu, 05 Mar 2026 00:02:05 GMT', 'vary': 'Origin, X-Origin, Referer', 'content-encoding': 'gzip', 'server': 'scaffolding on HTTPServer2', 'x-xss-protection': '0', 'x-frame-options': 'SAMEORIGIN', 'x-content-type-options': 'nosniff', 'alt-svc': 'h3=":443"; ma=2592000,h3-29=":443"; ma=2592000', 'transfer-encoding': 'chunked', 'status': 500}>, content <<!doctype html>
+<html lang=en>
+<title>500 Internal Server Error</title>
+<h1>Internal Server Error</h1>
+<p>The server encountered an internal error and was unable to complete your request. Either the server is overloaded or there is an error in the application.</p>
+>
+This may be due to network connectivity issues. Please check your network settings, and the status of the service you are trying to reach.
+
+D:\GCP>docker tag credit-model-api us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest
+
+D:\GCP>docker push us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest
+The push refers to repository [us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api]
+532079b11a5f: Pushed
+25d1effd6825: Pushed
+206356c42440: Layer already exists
+44df7c9b0118: Layer already exists
+aecf3e6b3e04: Layer already exists
+7fe6b2798913: Layer already exists
+5de15e2cec2c: Layer already exists
+33ddcf2a4b00: Layer already exists
+8a47105dfae1: Layer already exists
+latest: digest: sha256:468ab027dd4bed2bff5b745af4c57df3667fc16a9ba30ab8af54b2ce8fdd003a size: 856
+
+D:\GCP>gcloud ai endpoints undeploy-model 1799892288332103680 --region=us-central1 --deployed-model-id=4846278369085489152
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+
+D:\GCP>gcloud ai endpoints describe 1799892288332103680 --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+createTime: '2026-03-04T21:09:52.479558Z'
+deployedModels:
+- createTime: '2026-03-04T23:27:17.418349Z'
+  dedicatedResources:
+    machineSpec:
+      machineType: n1-standard-2
+    maxReplicaCount: 1
+    minReplicaCount: 1
+  displayName: credit-model-deployed
+  id: '4666697333944090624'
+  model: projects/1080487390825/locations/us-central1/models/6362371313125818368
+  modelVersionId: '1'
+  status:
+    availableReplicaCount: 1
+    lastUpdateTime: '2026-03-05T00:15:13.939162Z'
+displayName: credit-model-endpoint
+etag: AMEw9yNO5wko5DcX3-TN0WTkwoc6NO_Cadtiq0UYI3sdKP3ek_BEsJsO1AGTeQkErfqe
+name: projects/1080487390825/locations/us-central1/endpoints/1799892288332103680
+trafficSplit:
+  '4666697333944090624': 100
+updateTime: '2026-03-04T23:50:23.441457Z'
+
+D:\GCP>gcloud ai endpoints undeploy-model 1799892288332103680 --region=us-central1 --deployed-model-id=4666697333944090624
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+
+D:\GCP>gcloud ai endpoints describe 1799892288332103680 --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+createTime: '2026-03-04T21:09:52.479558Z'
+displayName: credit-model-endpoint
+etag: AMEw9yOYnj-L33daJaCwfTu5Cey3RAi8sZvWkm96ZcxHNHUUrOdBqbTzfJQ_-hbt8uNZ
+name: projects/1080487390825/locations/us-central1/endpoints/1799892288332103680
+updateTime: '2026-03-05T00:16:38.994538Z'
+
+D:\GCP>gcloud ai endpoints deploy-model 1799892288332103680 --region=us-central1 --model=6362371313125818368 --display-name=credit-model-deployed --machine-type=n1-standard-2
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Waiting for operation [6132378365635592192]...done.
+Deployed a model to the endpoint 1799892288332103680. Id of the deployed model: 4801242372811784192.
+
+D:\GCP>gcloud ai endpoints describe 1799892288332103680 --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+createTime: '2026-03-04T21:09:52.479558Z'
+deployedModels:
+- createTime: '2026-03-05T00:20:30.374069Z'
+  dedicatedResources:
+    machineSpec:
+      machineType: n1-standard-2
+    maxReplicaCount: 1
+    minReplicaCount: 1
+  displayName: credit-model-deployed
+  id: '4801242372811784192'
+  model: projects/1080487390825/locations/us-central1/models/6362371313125818368
+  modelVersionId: '1'
+  status:
+    availableReplicaCount: 1
+    lastUpdateTime: '2026-03-05T00:45:54.745814Z'
+displayName: credit-model-endpoint
+etag: AMEw9yObiSPu5HUwNDY0vm862me9rMUg0Vn9Hlxfspj-m0S02WpkFCiZi0KVqTkTBNx0
+name: projects/1080487390825/locations/us-central1/endpoints/1799892288332103680
+trafficSplit:
+  '4801242372811784192': 100
+updateTime: '2026-03-05T00:42:38.700581Z'
+
+D:\GCP>gcloud ai endpoints predict 1799892288332103680 --region=us-central1 --json-request=request.json
+Using endpoint [https://us-central1-prediction-aiplatform.googleapis.com/]
+ERROR: (gcloud.ai.endpoints.predict) HttpError accessing <https://us-central1-prediction-aiplatform.googleapis.com/v1/projects/modelo-pruebas-cloud/locations/us-central1/endpoints/1799892288332103680:predict?alt=json>: response: <{'content-type': 'text/html; charset=utf-8', 'x-vertex-ai-internal-prediction-backend': 'harpoon', 'date': 'Thu, 05 Mar 2026 00:46:51 GMT', 'vary': 'Origin, X-Origin, Referer', 'content-encoding': 'gzip', 'server': 'scaffolding on HTTPServer2', 'x-xss-protection': '0', 'x-frame-options': 'SAMEORIGIN', 'x-content-type-options': 'nosniff', 'alt-svc': 'h3=":443"; ma=2592000,h3-29=":443"; ma=2592000', 'transfer-encoding': 'chunked', 'status': 500}>, content <<!doctype html>
+<html lang=en>
+<title>500 Internal Server Error</title>
+<h1>Internal Server Error</h1>
+<p>The server encountered an internal error and was unable to complete your request. Either the server is overloaded or there is an error in the application.</p>
+>
+This may be due to network connectivity issues. Please check your network settings, and the status of the service you are trying to reach.
+
+D:\GCP>gcloud ai endpoints logs read 1799892288332103680 --region=us-central1
+ERROR: (gcloud.ai.endpoints) Invalid choice: 'logs'.
+Maybe you meant:
+  gcloud ai endpoints
+  gcloud ai index-endpoints
+
+To search the help text of gcloud commands, run:
+  gcloud help -- SEARCH_TERMS
+
+D:\GCP>gcloud logging read "resource.type=aiplatform.googleapis.com/Endpoint AND resource.labels.endpoint_id=1799892288332103680" --limit=20 --format=json
+[
+  {
+    "insertId": "k9vkegf3eudti",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:50:46] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:50:47.235768356Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:50:46.761649608Z"
+  },
+  {
+    "insertId": "oftpbef41nyod",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:50:36] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:50:37.236803176Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:50:36.761409521Z"
+  },
+  {
+    "insertId": "be9li8f8t4xe1",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:50:26] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:50:27.228084175Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:50:26.761924743Z"
+  },
+  {
+    "insertId": "1dou1w0f3k3zcw",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:50:16] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:50:17.228474628Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:50:16.760680198Z"
+  },
+  {
+    "insertId": "1b8eaolf3dx78i",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:50:06] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:50:07.228919852Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:50:06.761178255Z"
+  },
+  {
+    "insertId": "1hlnthdf8xo6gd",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:49:56] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:49:57.229350093Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:49:56.761928319Z"
+  },
+  {
+    "insertId": "wrvwc2f8ayofm",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:49:46] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:49:47.233918909Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:49:46.760612726Z"
+  },
+  {
+    "insertId": "1selgq7f8k686b",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:49:36] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:49:37.233241009Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:49:36.760219097Z"
+  },
+  {
+    "insertId": "1v5t43hf31vnox",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:49:26] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:49:27.233193375Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:49:26.760922193Z"
+  },
+  {
+    "insertId": "1acm0zkf8uisuq",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:49:16] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:49:17.231138746Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:49:16.760900974Z"
+  },
+  {
+    "insertId": "8m7q1of7zlix2",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:49:06] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:49:07.229682040Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:49:06.760582447Z"
+  },
+  {
+    "insertId": "1xnuls6f1elhsn",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:48:56] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:48:57.232158315Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:48:56.760828256Z"
+  },
+  {
+    "insertId": "h9e3olf92bjp7",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:48:46] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:48:47.242896034Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:48:46.760843992Z"
+  },
+  {
+    "insertId": "1b7w4dbf8uj83s",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:48:36] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:48:37.229012432Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:48:36.761304140Z"
+  },
+  {
+    "insertId": "abvq3ef8afusu",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:48:26] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:48:27.227686846Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:48:26.760982751Z"
+  },
+  {
+    "insertId": "bdx83uf39k6lk",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:48:16] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:48:17.226105090Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:48:16.760731935Z"
+  },
+  {
+    "insertId": "1m9sowaf91b8zl",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:48:06] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:48:07.230070389Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:48:06.761411666Z"
+  },
+  {
+    "insertId": "1dfolakf9dmaxu",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:47:56] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:47:57.229250477Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:47:56.761116027Z"
+  },
+  {
+    "insertId": "17lcf90f8lc6wn",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:47:46] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:47:47.229518144Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:47:46.761084079Z"
+  },
+  {
+    "insertId": "puu924f9dn27n",
+    "jsonPayload": {
+      "message": "10.0.11.1 - - [05/Mar/2026 00:47:36] \"GET / HTTP/1.1\" 200 -"
+    },
+    "labels": {
+      "deployed_model_id": "4801242372811784192",
+      "replica_id": "predictor-resource-pool-1690325404868411392-86cf79f4d-tbw76"
+    },
+    "logName": "projects/modelo-pruebas-cloud/logs/aiplatform.googleapis.com%2Fprediction_container",
+    "receiveTimestamp": "2026-03-05T00:47:37.229302212Z",
+    "resource": {
+      "labels": {
+        "endpoint_id": "1799892288332103680",
+        "location": "us-central1",
+        "resource_container": "projects/1080487390825"
+      },
+      "type": "aiplatform.googleapis.com/Endpoint"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-03-05T00:47:36.761713266Z"
+  }
+]
+
+D:\GCP>gcloud ai models upload --region=us-central1 --display-name=credit-model-v3 --container-image-uri=us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest --container-predict-route=/predict --container-health-route=/
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Waiting for operation [1569563440039591936]...done.
+
+D:\GCP>gcloud ai models list --region=us-central1
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+MODEL_ID             DISPLAY_NAME
+2993678791852687360  credit-model-v3
+6362371313125818368  credit-model-v2
+7283920386876506112  credit-model-v2
+1824994688550043648  credit-model
+
+D:\GCP>gcloud ai endpoints undeploy-model 1799892288332103680 --region=us-central1 --deployed-model-id=4801242372811784192
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+
+D:\GCP>gcloud ai endpoints deploy-model 1799892288332103680 --region=us-central1 --model=2993678791852687360 --display-name=credit-model-deployed --machine-type=n1-standard-2
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+Waiting for operation [95478987005886464]...done.
+Deployed a model to the endpoint 1799892288332103680. Id of the deployed model: 963331065361989632.
+
+D:\GCP>gcloud ai endpoints predict 1799892288332103680 --region=us-central1 --json-request=request.json
+Using endpoint [https://us-central1-prediction-aiplatform.googleapis.com/]
+[0]
+
+D:\GCP>gcloud ai endpoints undeploy-model 1799892288332103680 --region=us-central1 --deployed-model-id=4801242372811784192
+Using endpoint [https://us-central1-aiplatform.googleapis.com/]

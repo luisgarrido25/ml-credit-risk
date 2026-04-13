@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+
+# Entornos
+venv/
+.env
+
+# Modelos
+models/*.joblib
+
+# Datos
+data/
+
+# Sistema
+.DS_Store
+
+# Docker
+*.log
+
+# GCP
+*.json
