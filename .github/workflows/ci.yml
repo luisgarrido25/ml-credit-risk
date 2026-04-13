@@ -30,3 +30,17 @@ jobs:
       - name: Build Docker
         run: |
           docker build -t credit-model-api .
+
+      - name: Autenticarse en GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+
+      - name: Configurar Docker para Artifact Registry
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev
+
+      - name: Build y push imagen
+        run: |
+          docker build -t us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest .
+          docker push us-central1-docker.pkg.dev/modelo-pruebas-cloud/credit-model-repo/credit-model-api:latest
