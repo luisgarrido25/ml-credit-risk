@@ -1411,3 +1411,9 @@ Using endpoint [https://us-central1-prediction-aiplatform.googleapis.com/]
 
 D:\GCP>gcloud ai endpoints undeploy-model 1799892288332103680 --region=us-central1 --deployed-model-id=4801242372811784192
 Using endpoint [https://us-central1-aiplatform.googleapis.com/]
+
+
+*************************************************************************************************************************************
+GIT 
+
+git remote add origin https://github.com/luisgarrido25/ml-credit-risk.git
